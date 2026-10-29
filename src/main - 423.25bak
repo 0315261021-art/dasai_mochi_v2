@@ -1,0 +1,795 @@
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include <Wire.h> 
+#include <EEPROM.h>
+#include <ChronosESP32.h>
+#include <ArduinoJson.h>
+#include "sound.h"
+#include <time.h>
+
+BLECharacteristic* pCharacteristic = nullptr;
+
+#include "Dongle_20.h"
+
+#include "vector"
+#include "map"
+#include "settings.h"
+#include "gif_data.h"
+// INCLUDE file gif tạo từ webapp vô đây
+#include "gif/gundam.h"
+#include "gif/angry.h"
+#include "gif/angry2.h"
+#include "gif/angry3.h"
+#include "gif/aot.h"
+#include "gif/bee.h"
+#include "gif/cry.h"
+#include "gif/cry2.h"
+#include "gif/cuoi_khinh_bi.h"
+#include "gif/chong_mat.h"
+#include "gif/dasai.h"
+#include "gif/dasai2.h"
+#include "gif/mac_dinh.h"
+#include "gif/demon_slayer.h"
+#include "gif/den_giao_thong.h"
+#include "gif/den_pha.h"
+#include "gif/devil.h"
+#include "gif/devil_2.h"
+#include "gif/devil_eyes.h"
+#include "gif/distracted.h"
+#include "gif/egg.h"
+#include "gif/gian_du.h"
+#include "gif/yakura.h"
+#include "gif/hand_some.h"
+#include "gif/happy_2.h"
+#include "gif/hat_xi.h"
+#include "gif/hat_xi_2.h"
+#include "gif/hehe.h"
+#include "gif/intro.h"
+#include "gif/keep_it_up.h"
+#include "gif/leu_leu.h"
+#include "gif/love.h"
+#include "gif/love2.h"
+#include "gif/mochi.h"
+#include "gif/mochidoo.h"
+#include "gif/music.h"
+#include "gif/neon.h"
+#include "gif/noname.h"
+#include "gif/nheo_mat.h"
+#include "gif/nhin_ben_phai.h"
+#include "gif/nhin_ben_trai.h"
+#include "gif/nhin_xuong.h"
+#include "gif/police.h"
+#include "gif/pong.h"
+#include "gif/rain.h"
+#include "gif/sakura.h"
+#include "gif/samurai.h"
+#include "gif/scared.h"
+#include "gif/sleepy.h"
+#include "gif/smile.h"
+#include "gif/speed.h"
+#include "gif/star.h"
+#include "gif/sung_nuoc.h"
+#include "gif/sung_nuoc_2.h"
+#include "gif/sushi.h"
+#include "gif/turbo.h"
+#include "gif/thong_long.h"
+#include "gif/thu_nho.h"
+#include "gif/up_size_down.h"
+#include "gif/UwU.h"
+#include "gif/wheels.h"
+#include "gif/xi_khoi.h"
+#include "gif/xi_lua.h"
+#include "gif/speed2.h"
+#include "gif/speed3.h"
+#include "gif/yelling.h"
+#include "gif/LB_star.h"
+#include "gif/car.h"
+#include "gif/intro_3.h"
+#include "gif/LB.h"
+#include "gif/LB_intro.h"
+
+// Cấu hình màn hình
+U8G2* u8g2 = nullptr;
+
+// Cấu hình Chronos
+ChronosESP32 watch("DASAI");
+static bool hasNotification = false;
+static bool gifEnabled = true; // Biến này để bật/tắt GIF
+static bool showClock = false; // Biến này để hiển thị đồng hồ
+static unsigned long gifStartDelay = 0;
+float totalDistance = 0.0;
+bool isNavigating = false;
+bool useChronos = true;
+unsigned long lastTouchTime = 0;
+int touchCount = 0;
+bool isBluetoothEnabled = true;
+std::vector<const AnimatedGIF*> allGifPointers;
+
+TaskHandle_t gifTaskHandle = NULL;
+
+static const unsigned char image_bluetooth_not_connected_bits[] = {0x40,0x00,0xc1,0x00,0x42,0x01,0x44,0x02,0x48,0x04,0x10,0x04,0x20,0x02,0x40,0x00,0xa0,0x00,0x50,0x01,0x48,0x02,0x44,0x04,0x40,0x0a,0x40,0x11,0x80,0x20,0x00,0x00};
+static const unsigned char image_bluetooth_1_bits[] = {0x80,0x00,0x40,0x01,0x40,0x02,0x44,0x04,0x48,0x04,0x50,0x02,0x60,0x01,0xc0,0x00,0x60,0x01,0x50,0x02,0x48,0x04,0x44,0x04,0x40,0x02,0x40,0x01,0x80,0x00,0x00,0x00};
+static const unsigned char image_bluetooth_connected_bits[] = {0x80,0x00,0x40,0x01,0x40,0x02,0x44,0x04,0x48,0x04,0x52,0x12,0x64,0x09,0xcc,0x0c,0x64,0x09,0x52,0x12,0x48,0x04,0x44,0x04,0x40,0x02,0x40,0x01,0x80,0x00,0x00,0x00};
+
+static volatile bool nextGifRequested = false;
+static volatile bool gif_delay = true;
+void requestNextGif() {
+  nextGifRequested = true;
+  gif_delay = false;
+}
+static unsigned long bootTimestamp = 0;   // lưu millis() lúc setup xong
+static bool autoBTChecked = false;   
+
+const AnimatedGIF* getGifbyName(const char* name) {
+    for (int i = 0; i < NUM_GIF_ENTRIES; ++i) {
+        if (strcmp(allGifEntries[i].name, name) == 0) {
+            return allGifEntries[i].ptr;
+        }
+    }
+    return &mac_dinh_gif;
+}
+
+void playGIF(const AnimatedGIF* gif, bool inverted = false, uint16_t loopCount = 1) {
+  for (uint16_t loop = 0; loop < loopCount; loop++) {
+     if (!gifEnabled || nextGifRequested) {
+        nextGifRequested = false;
+        return;
+      }
+    for (uint8_t frame = 0; frame < gif->frame_count; frame++) {
+      if (!gifEnabled || nextGifRequested) {
+        nextGifRequested = false;
+        return;
+      }
+      u8g2->clearBuffer();
+
+      for (uint16_t y = 0; y < gif->height; y++) {
+        for (uint16_t x = 0; x < gif->width; x++) {
+          uint16_t byteIndex = y * (((gif->width + 7) / 8)) + (x / 8);
+          uint8_t  bitIndex  = 7 - (x % 8);
+          bool bitOn = gif->frames[frame][byteIndex] & (1 << bitIndex);
+
+          if ((bitOn && !settings.isInverted) || (!bitOn && settings.isInverted)) {
+            u8g2->drawPixel(x, y);
+          }
+        }
+      }
+
+      u8g2->sendBuffer();
+      delay(200 - settings.gifSpeed + gif->delays[frame]);
+    }
+  }
+}
+
+void playGIFEx(const AnimatedGIF* gif, uint16_t loopCount = 1) {
+  // Hàm playGIF không bị ảnh hưởng bởi task
+  for (uint16_t loop = 0; loop < loopCount; loop++) {
+    for (uint8_t frame = 0; frame < gif->frame_count; frame++) {
+    
+      u8g2->clearBuffer();
+
+      for (uint16_t y = 0; y < gif->height; y++) {
+        for (uint16_t x = 0; x < gif->width; x++) {
+          uint16_t byteIndex = y * (((gif->width + 7) / 8)) + (x / 8);
+          uint8_t  bitIndex  = 7 - (x % 8);
+          bool bitOn = gif->frames[frame][byteIndex] & (1 << bitIndex);
+
+          if ((bitOn && !settings.isInverted) || (!bitOn && settings.isInverted)) {
+            u8g2->drawPixel(x, y);
+          }
+        }
+      }
+
+      u8g2->sendBuffer();
+      delay(200 - settings.gifSpeed + gif->delays[frame]);
+    }
+  }
+}
+
+void drawWrapped(const String &text, int x, int y, int maxWidth, int lineHeight) {
+  int len = text.length();
+  std::vector<String> words;
+  int idx = 0;
+
+  while (idx < len) {
+    int nextSpace = text.indexOf(' ', idx);
+    int nextNewline = text.indexOf('\n', idx);
+
+    int nextIdx = -1;
+    bool isNewline = false;
+
+    if (nextSpace == -1 && nextNewline == -1) {
+      nextIdx = len;
+    } else if (nextNewline != -1 && (nextSpace == -1 || nextNewline < nextSpace)) {
+      nextIdx = nextNewline;
+      isNewline = true;
+    } else {
+      nextIdx = nextSpace;
+    }
+
+    String w = text.substring(idx, nextIdx);
+    if (!isNewline && nextIdx < len) w += ' ';  // Thêm space nếu không phải \n
+
+    words.push_back(w);
+    if (isNewline) words.push_back("\n");  // Thêm từ đặc biệt xuống dòng
+
+    idx = nextIdx + 1;
+  }
+
+  // 2) Vẽ từng dòng, xuống dòng nếu cần
+  int cursorY = y;
+  String line = "";
+
+  for (auto &w : words) {
+    if (w == "\n") {
+      // vẽ dòng hiện tại và xuống dòng mới
+      u8g2->setCursor(x, cursorY);
+      u8g2->print(line);
+      cursorY += lineHeight;
+      line = "";
+    } else if (u8g2->getUTF8Width((line + w).c_str()) <= maxWidth) {
+      line += w;
+    } else {
+      // vẽ dòng hiện tại và bắt đầu dòng mới
+      u8g2->setCursor(x, cursorY);
+      u8g2->print(line);
+      cursorY += lineHeight;
+      line = w;
+    }
+  }
+
+  // Vẽ dòng cuối (nếu còn)
+  if (line.length() && cursorY <= u8g2->getDisplayHeight()) {
+    u8g2->setCursor(x, cursorY);
+    u8g2->print(line);
+  }
+}
+
+void showMessageAndWait(const char* msg, int waitMs = 1000) {
+  gifEnabled = false;
+  vTaskDelay(20 / portTICK_PERIOD_MS);  // chờ gif task dừng hẳn
+
+  u8g2->clearBuffer();
+  u8g2->enableUTF8Print();
+  u8g2->setFont(Dongle_20);
+  drawWrapped(msg, 30, 11, 126, 10);
+  u8g2->sendBuffer();
+
+  delay(waitMs);  // hoặc vTaskDelay nếu trong task
+
+  gifEnabled = !showClock;
+}
+void showBluetoothStatus(const char* message, const uint8_t* icon) {
+    gifEnabled = false;
+    vTaskDelay(20 / portTICK_PERIOD_MS);  // Chờ gif task
+    u8g2->clearBuffer();
+    u8g2->enableUTF8Print();
+    u8g2->setFont(Dongle_20);
+    drawWrapped(message, 23, 32, 126, 10);
+    u8g2->setBitmapMode(1);
+    u8g2->drawXBM(4, 21, 14, 16, icon);
+    u8g2->sendBuffer();
+    delay(1000);  // Hiển thị thông báo 1 giây
+    gifEnabled = !showClock;
+}
+
+void toggleBluetooth() {
+    playSoundAsync(settings.notification_sound);
+    
+    if (isBluetoothEnabled) {
+        watch.stop(true);  // Tắt toàn bộ BLE
+        isBluetoothEnabled = false;
+        showBluetoothStatus("Đã tắt Bluetooth", image_bluetooth_not_connected_bits);
+    } else {
+        watch.begin();     // Khởi động lại BLE
+        isBluetoothEnabled = true;
+        showBluetoothStatus("Đã bật Bluetooth", image_bluetooth_connected_bits);
+    }
+}
+void handleTouch() {
+  static bool wasTouched = false;
+  static unsigned long pressStart = 0;
+  static unsigned long lastClickTime = 0;
+  static bool clickPending = false;
+  static bool longClickTriggered = false;
+
+  int state = digitalRead(settings.touch_pin);
+
+  // Nếu vẫn đang giữ và quá 1s mà chưa xử lý long click → xử lý ngay
+  if (wasTouched && !longClickTriggered && millis() - pressStart > 500) {
+    longClickTriggered = true;
+      if (strcmp(settings.gif_long_touch, "show_clock") == 0) {
+        showClock = !showClock; // Đảo ngược trạng thái của showClock
+        gifEnabled = !showClock;
+      } else if (strcmp(settings.gif_long_touch, "next_gif") == 0) {
+        requestNextGif();
+      } else if (strcmp(settings.gif_long_touch, "bluetooth") == 0) {
+        toggleBluetooth(); // Bật/tắt Bluetooth
+      } else {
+      gifEnabled = false;
+      vTaskDelay(20 / portTICK_PERIOD_MS);  // chờ gif task dừng hẳn
+      clickPending = false; // huỷ click
+      playSoundAsync(settings.long_touch_sound);
+      const AnimatedGIF* gif_long_touch = getGifbyName(settings.gif_long_touch);
+
+      int totalDuration = getSoundDurationMs(settings.long_touch_sound);
+      unsigned long start = millis();
+      while (millis() - start < totalDuration) {
+        playGIFEx(gif_long_touch, 1);
+      }
+      gifEnabled = !showClock;
+    }
+  }
+
+  // Xử lý click pending nếu đã quá 400ms mà không có lần nhấn thứ 2
+  if (clickPending && millis() - lastClickTime > 400) {
+     clickPending = false;
+     
+    if (strcmp(settings.gif_touch, "show_clock") == 0) {
+      showClock = !showClock; // Đảo ngược trạng thái của showClock
+      gifEnabled = !showClock;
+    } else if (strcmp(settings.gif_touch, "next_gif") == 0) {
+        requestNextGif();
+    } else if (strcmp(settings.gif_touch, "bluetooth") == 0) {
+        toggleBluetooth(); // Bật/tắt Bluetooth
+    } else {
+      gifEnabled = false;
+      vTaskDelay(20 / portTICK_PERIOD_MS);  // chờ gif task dừng hẳn
+      playSoundAsync(settings.touch_sound);
+      const AnimatedGIF* gif_touch = getGifbyName(settings.gif_touch);
+
+      int totalDuration = getSoundDurationMs(settings.touch_sound);
+      unsigned long start = millis();
+      while (millis() - start < totalDuration) {
+        playGIFEx(gif_touch, 1);
+      }
+
+      if(!showClock) gifEnabled = true;
+    }
+    
+  }
+
+  // Khi bắt đầu nhấn
+  if (state == HIGH && !wasTouched) {
+    wasTouched = true;
+    pressStart = millis();
+    longClickTriggered = false; // reset flag long click
+  }
+
+  // Khi buông tay
+  if (state == LOW && wasTouched) {
+    wasTouched = false;
+    unsigned long pressDuration = millis() - pressStart;
+
+    // Nếu đã xử lý long click trong lúc giữ thì bỏ qua
+    if (longClickTriggered) {
+      return;
+    }
+
+    // Xử lý double click
+    if (clickPending && millis() - lastClickTime < 500) {
+      clickPending = false;
+
+      if (strcmp(settings.gif_double_touch, "show_clock") == 0) {
+        showClock = !showClock; // Đảo ngược trạng thái của showClock
+        gifEnabled = !showClock;
+      }else if (strcmp(settings.gif_double_touch, "next_gif") == 0) {
+        requestNextGif();
+      } else if (strcmp(settings.gif_double_touch, "bluetooth") == 0) {
+        toggleBluetooth(); // Bật/tắt Bluetooth
+      } else {
+        gifEnabled = false;
+        vTaskDelay(20 / portTICK_PERIOD_MS);  // chờ gif task dừng hẳn
+        playSoundAsync(settings.double_touch_sound);
+        const AnimatedGIF* gif_double_touch = getGifbyName(settings.gif_double_touch);
+
+        int totalDuration = getSoundDurationMs(settings.double_touch_sound);
+        unsigned long start = millis();
+        while (millis() - start < totalDuration) {
+          playGIFEx(gif_double_touch, 1);
+        }
+        gifEnabled = !showClock;
+      }
+
+    } else {
+      // Chờ thêm để xác định click đơn
+      lastClickTime = millis();
+      clickPending = true;
+    }
+  }
+}
+
+void setSystemTimeFromWatch() {
+    struct tm t;
+    t.tm_year = 2024 - 1900; // ESP32 không có năm từ watch, Ngài có thể chỉnh cứng hoặc lưu riêng
+    t.tm_mon  = watch.getMonth(); // 0-based
+    t.tm_mday = watch.getDay();
+    t.tm_hour = watch.getHourC();
+    t.tm_min  = watch.getMinute();
+    t.tm_sec  = watch.getSecond();
+    time_t timeSinceEpoch = mktime(&t);
+    struct timeval now = { .tv_sec = timeSinceEpoch };
+    settimeofday(&now, NULL);
+}
+
+// Callback để nhận trạng thái kết nối Chronos
+void connectionCallback(bool state){
+  if (state) {
+    autoBTChecked = true; 
+    setSystemTimeFromWatch();
+  }
+}
+static unsigned long lastNotiTime = 0;
+
+String getCurrentTimeString() {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) return "00:00:00";
+
+    char buf[9];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    return String(buf);
+}
+
+String getCurrentDateString() {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) return "01/01";
+
+    char buf[6];
+    sprintf(buf, "%02d/%02d", timeinfo.tm_mday, timeinfo.tm_mon+1);
+    return String(buf);
+}
+
+void drawDistanceBar(U8G2 &u8g2, const String &distanceText) {
+    const int screenWidth = 128;
+    const int barHeight = 4;
+    const int barY = 64 - barHeight;
+    const int borderThickness = 1;
+
+    // Sửa lỗi replace
+    String cleanedText = distanceText;
+    cleanedText.replace(',', '.');
+
+    float distance = 0;
+    char unit[4] = "";
+    sscanf(cleanedText.c_str(), "%f %3s", &distance, unit);
+
+    // Nếu là km thì convert sang mét
+    if (String(unit).startsWith("k") || String(unit).startsWith("K")) {
+        distance *= 1000;
+    }
+
+    // Mặc định: full bar nếu >= 500m, giảm dần nếu < 500m
+    float ratio = 1.0;
+    if (distance < 500.0) {
+        ratio = distance / 500.0;
+    }
+
+    int fillWidth = ratio * screenWidth;
+
+    // Vẽ viền bar
+    u8g2.drawHLine(0, barY, screenWidth);
+    u8g2.drawHLine(0, barY + barHeight - 1, screenWidth);
+
+    // Vẽ phần tô
+    u8g2.drawBox(0, barY + borderThickness, fillWidth, barHeight - 2);
+}
+
+void notificationCallback(Notification notification) {
+  gifEnabled = false;
+  hasNotification = true;
+  vTaskDelay(20 / portTICK_PERIOD_MS);  // chờ gif task dừng hẳn
+
+   Notification noti = watch.getNotificationAt(0);
+    u8g2->clearBuffer();
+
+  // Vẽ icon nếu muốn (sau này convert int icon thành hình ảnh hoặc ký hiệu)
+  // Giả sử vẽ icon tại (0, 0) nếu icon < 10:
+  if (noti.icon >= 0 && noti.icon < 10) {
+      u8g2->setFont(u8g2_font_open_iconic_embedded_4x_t);
+      u8g2->drawGlyph(0, 32, noti.icon); // icon = int, cần tra bảng để biết mã nào là gì
+  }
+  u8g2->drawRFrame(0, 0, 128, 54, 4);
+  u8g2->setFont(Dongle_20);
+  String msg = noti.message;        
+  drawWrapped(msg.c_str(), 2, 11, 126, 10); // Nội dung thông báo
+  u8g2->drawStr(2, 64, noti.app.c_str()); // Tên APP
+
+  // Vẽ thời gian ở góc dưới
+  u8g2->setFont(u8g2_font_5x8_tr);
+  int tx = 128 - u8g2->getStrWidth(noti.time.c_str()) - 2;
+  u8g2->drawStr(tx, 64, noti.time.c_str());
+
+  u8g2->sendBuffer();
+  playSoundAsync(settings.notification_sound);
+
+  delay(settings.notifDuration*1000); 
+  //delay(settings.notifDuration); 
+  
+  if(!showClock){
+    gifEnabled = true; // Nếu không phải đang hiện đồng hồ thì mới bật lại GIF 
+  }
+  hasNotification = false;
+}
+
+
+void drawIconAndTitle(U8G2 &u8g2, const Navigation &nav) {
+    if (!nav.hasIcon) return;
+
+    // Vẽ icon 48x48 từ mảng bitmap (icon dạng 1bpp)
+    u8g2.drawBitmap(0, 0, 48 / 8, 48, nav.icon);
+
+    // Lấy phần đầu của title (trước dấu '/')
+    String titleMain = nav.directions;
+    int slashIndex = titleMain.indexOf('/');
+    if (slashIndex >= 0) {
+        titleMain = titleMain.substring(0, slashIndex);
+        titleMain.trim(); // bỏ khoảng trắng dư
+    }
+
+    // Thiết lập font (sếp thay bằng font khác nếu muốn)
+    u8g2.setFont(Dongle_20);
+
+    // Vẽ tiêu đề bên phải icon
+    drawWrapped(titleMain, 50, 16, 78, 10); 
+}
+void drawClockScreen() {
+    u8g2->clearBuffer();
+
+    String timeStr = getCurrentTimeString();
+    String dateStr = getCurrentDateString();
+    String batteryStr = "";//String(watch.getPhoneBattery()) + "%"; // giữ nguyên    
+    if (watch.isConnected()) {
+        batteryStr = String(watch.getPhoneBattery()) + "%";
+    }else{
+      u8g2->setBitmapMode(1);
+      u8g2->drawXBM(112, 3, 14, 16, image_bluetooth_not_connected_bits);
+    }
+    
+   
+    u8g2->drawRFrame(0, 0, 128, 64, 4);
+    u8g2->setFont(Dongle_20);
+    u8g2->drawStr(4, 11, dateStr.c_str());
+    int battX = 128 - u8g2->getStrWidth(batteryStr.c_str()) - 4;
+    u8g2->drawStr(battX, 11, batteryStr.c_str());
+    u8g2->setFont(u8g2_font_logisoso26_tf);
+    int tw = u8g2->getStrWidth(timeStr.c_str());
+    u8g2->drawStr((128 - tw) / 2, 52, timeStr.c_str());
+    u8g2->sendBuffer();
+}
+
+
+String extractCleanDistance(const String& rawText) {
+    // Cắt đến ký tự đầu tiên không phải khoảng trắng
+    String trimmed = rawText;
+    trimmed.trim(); // loại bỏ space, tab, newline ở đầu/cuối
+
+    // Tìm chữ số đầu tiên
+    int start = -1;
+    for (int i = 0; i < trimmed.length(); i++) {
+        if (isDigit(trimmed[i])) {
+            start = i;
+            break;
+        }
+    }
+
+    if (start == -1) return "";
+
+    // Tìm vị trí kết thúc của đơn vị (tới khi gặp ký tự không phải chữ hoặc số hoặc khoảng trắng)
+    int end = start;
+    while (end < trimmed.length() && 
+          (isAlphaNumeric(trimmed[end]) || trimmed[end] == ' ' || trimmed[end] == ',' || trimmed[end] == '.')) {
+        end++;
+    }
+
+    return trimmed.substring(start, end);
+}
+void checkAndPlayBeepIfClose(const String& title) {
+    if (title.length() == 0) return; // bỏ qua nếu rỗng
+
+    String cleaned = title;
+    cleaned.replace(',', '.');
+
+    float distance = 0;
+    char unit[4] = "";
+    sscanf(cleaned.c_str(), "%f %3s", &distance, unit);
+    if (distance <= 0) return; // nếu không có khoảng cách thì không làm gì
+    if (String(unit).startsWith("k") || String(unit).startsWith("K")) {
+        distance *= 1000;
+    }
+
+    if (distance < 100) {
+        playSoundAsync("C6 100 50 C6 100 50 C6 300"); // đoạn beep cảnh báo
+    }
+}
+void shuffleVector(std::vector<const AnimatedGIF*>& vec) {
+  int n = vec.size();
+  for (int i = n - 1; i > 0; --i) {
+    int j = random(i + 1);
+    std::swap(vec[i], vec[j]);
+  }
+}
+
+void gifTask(void *param) {
+  while (true) {
+    if (!gifEnabled) {
+      vTaskDelay(10 / portTICK_PERIOD_MS); // không làm gì khi disable
+      continue;
+    }
+
+    shuffleVector(allGifPointers);
+    for (const AnimatedGIF* gif : allGifPointers) {
+      if (!gifEnabled) break;
+
+      playGIF(gif, 1);
+      
+
+      if (!gifEnabled) break;
+
+      unsigned long delayStart = millis();
+      while (millis() - delayStart < settings.gifDelay) {
+        if (!gifEnabled || gif_delay == false){
+          gif_delay = true; // reset lại trạng thái delay
+          break;
+        } 
+        playGIF(&mac_dinh_gif, 1);  // phát 1 vòng
+      }
+    }
+  }
+}
+
+bool scanI2C() {
+  Wire.beginTransmission(0x3C); // SSD1306/SH1106 thường là 0x3C
+  return (Wire.endTransmission() == 0); // trả về true nếu thiết bị phản hồi
+}
+void configCallback(Config config, uint32_t a, uint32_t b){
+    switch (config){
+    case CF_NAV_DATA:
+       if (a) { // bắt đầu điều hướng
+          gifEnabled = false; // Tắt GIF khi bắt đầu điều hướng
+          u8g2->clearBuffer();
+          u8g2->sendBuffer();
+          Navigation nav = watch.getNavigation();
+          u8g2->setFont(Dongle_20);
+          drawIconAndTitle(*u8g2, nav);
+          //drawDistanceBar(*u8g2, nav.distance.c_str()); // Tổng quãng đường
+          drawDistanceBar(*u8g2, extractCleanDistance(nav.title).c_str()); // Quãng đường đến điểm quẹo
+          //drawWrapped((nav.duration).c_str(), 0, 55, 100, 10); 
+          drawWrapped(extractCleanDistance(nav.title).c_str(), 0, 55, 100, 10); // khoảng cách
+          checkAndPlayBeepIfClose(extractCleanDistance(nav.title).c_str());
+          u8g2->sendBuffer();
+          isNavigating = true;
+        } else {
+          gifEnabled = !showClock; // Bật GIF nếu không phải đang hiện đồng hồ
+          delay(100); // Bật lại GIF nếu không còn điều hướng
+        }
+        break;
+    case CF_NAV_ICON:
+        Serial.print("Navigation Icon data, position: ");
+        Serial.println(a);
+        Serial.print("Icon CRC: ");
+        Serial.printf("0x%04X\n", b);
+        break;
+    case CF_FIND:    
+        showClock = !showClock; // Đảo ngược trạng thái của showClock
+        gifEnabled = !showClock;
+
+    }
+}
+
+void setDefaultTime() {
+    struct tm t;
+    t.tm_year = 2024 - 1900;
+    t.tm_mon = 0;
+    t.tm_mday = 1;
+    t.tm_hour = 0;
+    t.tm_min = 0;
+    t.tm_sec = 0;
+
+    time_t defaultTime = mktime(&t);
+    struct timeval now = { .tv_sec = defaultTime };
+    settimeofday(&now, NULL);
+}
+
+void setup(void) {
+    Serial.begin(921600);
+    configTime(0, 0, "");
+    setDefaultTime();  
+    
+    loadSettings();           // Load từ EEPROM
+     
+    Wire.begin(settings.i2cSDA, settings.i2cSCL);
+
+    if (strcmp(settings.display_type, "sh1106") == 0) {
+      static U8G2_SH1106_128X64_NONAME_F_HW_I2C sh1106(U8G2_R0, U8X8_PIN_NONE);
+      u8g2 = &sh1106;
+    } else {
+      static U8G2_SSD1306_128X64_NONAME_F_HW_I2C ssd1306(U8G2_R0, U8X8_PIN_NONE);
+      u8g2 = &ssd1306;
+    }
+
+    loadSelectedGifs();
+    initSoundTask();
+    
+    playSoundAsync(settings.intro_sound);
+    if (settings.touch_pin < 22 && settings.touch_pin > 0) {
+      pinMode(settings.touch_pin, INPUT);
+    }
+    
+    if (useChronos) {
+        watch.setConnectionCallback(connectionCallback);
+        watch.setNotificationCallback(notificationCallback);      
+        watch.setConfigurationCallback(configCallback);
+        watch.setName(settings.bluetoothName);
+        watch.begin();
+        Serial.println("BLE Android (Chronos) started");
+        watch.setBattery(80);
+      } else {
+       //IOS
+      }
+      
+   if (scanI2C()) {
+    u8g2->begin();
+    u8g2->clearBuffer();
+    u8g2->enableUTF8Print(); // Bật hỗ trợ UTF-8
+    u8g2->setFont(Dongle_20);
+    u8g2->drawStr(15, 35, "HUYKHONG");    
+    u8g2->sendBuffer();
+    delay(300);
+
+    const AnimatedGIF* introGif = getGifbyName(settings.gifIntro);
+    if (introGif != nullptr) {
+        playGIF(introGif, 1);
+    }
+    
+    xTaskCreatePinnedToCore(
+      gifTask,          // Hàm task
+      "gifTask",        // Tên task
+      8192,             // Stack size
+      NULL,             // Tham số
+      1,                // Ưu tiên
+      &gifTaskHandle,              // Handle (không cần)
+      0                 // Core 0 (WiFi thường ở core 1)
+    );
+
+  } else {
+    Serial.println("Return:❌ Không tìm thấy thiết bị I2C tại 0x3C – bỏ qua u8g2");
+    Serial.println("scl: " + String(settings.i2cSCL) + ", sda: " + String(settings.i2cSDA));
+    u8g2 = nullptr;
+  }
+    
+   sendAllSettings();
+   bootTimestamp = millis();
+}
+
+void loop(void) {
+   
+    handleSerialSettings();
+    if (u8g2 != nullptr) {
+      static unsigned long gifStartDelay = 0;
+
+      if (settings.touch_pin < 22 && settings.touch_pin > 0) {
+        handleTouch();
+      }
+      
+      watch.loop(); // handles internal routine functions
+
+       if (showClock) {
+        if(hasNotification == false && isNavigating == false){ // Cho noti đè lên nếu có (ko hiện đồng hồ)
+          drawClockScreen();
+        }
+        delay(100);
+      }else{
+        if(hasNotification == false && isNavigating == false){
+          gifEnabled = true; // Bật GIF nếu không có thông báo
+        }
+      }
+
+      if (!autoBTChecked && settings.bluetooth_auto_off > 0 && millis() - bootTimestamp >= settings.bluetooth_auto_off * 60UL * 1000UL) {
+        autoBTChecked = true;          // chỉ làm 1 lần
+        if (isBluetoothEnabled) {
+          toggleBluetooth();
+        }
+      }
+
+    }
+}
+
